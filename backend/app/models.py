@@ -86,12 +86,14 @@ class Customer(Base):
     gstin: Mapped[str] = mapped_column(String(20), default="")
     address: Mapped[str] = mapped_column(Text, default="")
     credit_limit: Mapped[int] = mapped_column(Money, default=0)
+    state_code: Mapped[str] = mapped_column(String(4), default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Supplier(Base):
     __tablename__ = "suppliers"
     id: Mapped[int] = mapped_column(primary_key=True)
+    state_code: Mapped[str] = mapped_column(String(4), default="")
     name: Mapped[str] = mapped_column(String(200), index=True)
     phone: Mapped[str] = mapped_column(String(30), default="")
     gstin: Mapped[str] = mapped_column(String(20), default="")
@@ -120,6 +122,7 @@ class SalesInvoice(Base):
     cancel_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     print_count: Mapped[int] = mapped_column(Integer, default=0)
+    is_igst: Mapped[bool] = mapped_column(Boolean, default=False)  # inter-state supply
     lines: Mapped[list["SalesLine"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     customer: Mapped[Customer | None] = relationship()
     user: Mapped[User] = relationship()
@@ -160,6 +163,10 @@ class PurchaseInvoice(Base):
     total: Mapped[int] = mapped_column(Money, default=0)
     paid: Mapped[int] = mapped_column(Money, default=0)
     note: Mapped[str] = mapped_column(String(200), default="")
+    status: Mapped[str] = mapped_column(String(12), default="posted")  # posted | cancelled
+    credited: Mapped[int] = mapped_column(Money, default=0)  # reduced by supplier returns
+    is_igst: Mapped[bool] = mapped_column(Boolean, default=False)
+    cancel_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     lines: Mapped[list["PurchaseLine"]] = relationship(back_populates="invoice", cascade="all, delete-orphan")
     supplier: Mapped[Supplier] = relationship()
     __table_args__ = (UniqueConstraint("supplier_id", "supplier_invoice_no", name="uq_supplier_invoice"),)
@@ -177,6 +184,7 @@ class PurchaseLine(Base):
     taxable: Mapped[int] = mapped_column(Money)
     tax: Mapped[int] = mapped_column(Money)
     line_total: Mapped[int] = mapped_column(Money)
+    returned_qty: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=0)
     invoice: Mapped[PurchaseInvoice] = relationship(back_populates="lines")
 
 
@@ -244,6 +252,36 @@ class SalesReturnLine(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
     qty: Mapped[Decimal] = mapped_column(Numeric(14, 3))
     disposition: Mapped[str] = mapped_column(String(12), default="restock")  # restock | damaged
+    taxable: Mapped[int] = mapped_column(Money)
+    tax: Mapped[int] = mapped_column(Money)
+    amount: Mapped[int] = mapped_column(Money)
+
+
+class PurchaseReturn(Base):
+    __tablename__ = "purchase_returns"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    number: Mapped[str] = mapped_column(String(30), unique=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("purchase_invoices.id"), index=True)
+    date: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    taxable: Mapped[int] = mapped_column(Money, default=0)
+    tax: Mapped[int] = mapped_column(Money, default=0)
+    total: Mapped[int] = mapped_column(Money, default=0)
+    payable_reduction: Mapped[int] = mapped_column(Money, default=0)  # reduces what we owe the supplier
+    refund_amount: Mapped[int] = mapped_column(Money, default=0)  # money received back from supplier
+    refund_method: Mapped[str] = mapped_column(String(10), default="cash")
+    reason: Mapped[str] = mapped_column(String(200), default="")
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    lines: Mapped[list["PurchaseReturnLine"]] = relationship(cascade="all, delete-orphan")
+
+
+class PurchaseReturnLine(Base):
+    __tablename__ = "purchase_return_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    return_id: Mapped[int] = mapped_column(ForeignKey("purchase_returns.id"), index=True)
+    purchase_line_id: Mapped[int] = mapped_column(ForeignKey("purchase_lines.id"))
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    qty: Mapped[Decimal] = mapped_column(Numeric(14, 3))
     taxable: Mapped[int] = mapped_column(Money)
     tax: Mapped[int] = mapped_column(Money)
     amount: Mapped[int] = mapped_column(Money)

@@ -1,4 +1,6 @@
 import logging
+import os
+import sys
 import threading
 import time
 from datetime import date
@@ -8,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 
 from .core import APP_VERSION, BACKUP_DIR, SessionLocal, engine
 from .models import Base, SchemaVersion
@@ -16,18 +18,46 @@ from .routers import accounts, admin, auth, parties, products, purchases, report
 from .services import seed_accounts
 
 log = logging.getLogger("erp")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+# Works both from source and when frozen by PyInstaller (resources are unpacked under sys._MEIPASS).
+BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+MIGRATIONS_DIR = BASE / "migrations"
+
+
+def _alembic_cfg():
+    from alembic.config import Config
+    cfg = Config()
+    cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+    return cfg
+
+
+def run_migrations() -> None:
+    """Apply pending Alembic migrations. An existing installation is backed up first."""
+    from alembic import command
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
+    cfg = _alembic_cfg()
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    with engine.connect() as conn:
+        current = MigrationContext.configure(conn).get_current_revision()
+        has_data = "users" in inspect(conn).get_table_names()
+    if current != head and has_data:
+        log.warning("pending migration %s -> %s: taking pre-migration backup", current, head)
+        admin.make_backup("pre-migration")
+    with engine.begin() as conn:
+        cfg.attributes["connection"] = conn
+        command.upgrade(cfg, "head")
 
 
 def init_db() -> None:
-    """Create tables and record schema version. Future migrations append to MIGRATIONS (each runs once, after a backup)."""
-    Base.metadata.create_all(engine)
+    run_migrations()
+    Base.metadata.create_all(engine)  # safety net for any table not covered by a migration
     with SessionLocal() as db:
-        cur = db.execute(select(SchemaVersion.version).order_by(SchemaVersion.version.desc()).limit(1)).scalar_one_or_none() or 0
-        if cur < SCHEMA_VERSION:
+        if db.execute(select(SchemaVersion)).first() is None:
             db.add(SchemaVersion(version=SCHEMA_VERSION))
-        if db.execute(select(SchemaVersion)).first():
-            seed_accounts(db)
+        seed_accounts(db)
         db.commit()
 
 
@@ -71,7 +101,7 @@ def health():
     return {"ok": True, "version": APP_VERSION}
 
 
-FRONT = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+FRONT = Path(os.environ.get("ERP_FRONTEND_DIR") or (BASE / "frontend_dist" if hasattr(sys, "_MEIPASS") else Path(__file__).resolve().parents[2] / "frontend" / "dist"))
 if FRONT.exists():
     app.mount("/assets", StaticFiles(directory=FRONT / "assets"), name="assets")
 

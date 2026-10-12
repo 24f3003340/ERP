@@ -10,7 +10,7 @@ from ..core import ApiError, get_db, has_perm, require
 from ..models import (Customer, Payment, PaymentAllocation, Product, SalesInvoice, SalesLine, SalesReturn,
                       SalesReturnLine, StockMovement)
 from ..schemas import CancelIn, ReturnIn, SaleIn
-from ..services import (audit, calc_line, get_business, method_account, move_stock, next_number, post_journal, rnd,
+from ..services import (audit, calc_line, ensure_open, get_business, is_interstate, method_account, move_stock, next_number, post_journal, rnd,
                         reverse_journals, today, unwrap_integrity)
 from .parties import customer_balance, sales_due
 
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api", tags=["sales"])
 def invoice_out(i: SalesInvoice, detail: bool = False) -> dict:
     d = {"id": i.id, "number": i.number, "date": i.date.isoformat(), "created_at": i.created_at.isoformat(),
          "status": i.status, "customer_id": i.customer_id, "customer": i.customer.name if i.customer else "Walk-in",
-         "cashier": i.user.username if i.user else "", "taxable": i.taxable, "discount_total": i.discount_total,
+         "cashier": i.user.username if i.user else "", "is_igst": i.is_igst, "taxable": i.taxable, "discount_total": i.discount_total,
          "tax_total": i.tax_total, "round_off": i.round_off, "total": i.total, "paid": i.paid, "credited": i.credited,
          "due": sales_due(i), "cancel_reason": i.cancel_reason, "print_count": i.print_count}
     if detail:
@@ -39,11 +39,14 @@ def create_sale(body: SaleIn, user=Depends(require("sales.create")), db: Session
         if dup:  # retried request: return the original invoice, never double-post
             return invoice_out(dup, True)
     d = today()
+    ensure_open(db, d)
     inv = SalesInvoice(number=next_number(db, "sales", biz.invoice_prefix, d), idem_key=body.idem_key, date=d,
                        customer_id=body.customer_id, user_id=user.id, taxable=0, discount_total=0, tax_total=0,
                        round_off=0, total=0, paid=0, credited=0, print_count=0)
-    if body.customer_id and not db.get(Customer, body.customer_id):
+    cust0 = db.get(Customer, body.customer_id) if body.customer_id else None
+    if body.customer_id and not cust0:
         raise ApiError("Customer not found", 404)
+    inv.is_igst = bool(cust0 and is_interstate(biz.state_code, cust0.state_code))
     can_override = has_perm(user.role, "price.override")
     cogs = 0
     gross_list = 0
@@ -170,6 +173,7 @@ def cancel_sale(iid: int, body: CancelIn, user=Depends(require("sales.cancel")),
         raise ApiError("Invoice not found", 404)
     if inv.status != "posted":
         raise ApiError("Invoice already cancelled", 409)
+    ensure_open(db, today())
     if db.scalar(select(func.count()).select_from(SalesReturn).where(SalesReturn.invoice_id == iid)):
         raise ApiError("Invoice has returns; cancellation not allowed", 409)
     d = today()
@@ -198,6 +202,7 @@ def create_return(iid: int, body: ReturnIn, user=Depends(require("sales.return")
         raise ApiError("Invoice not found", 404)
     if inv.status != "posted":
         raise ApiError("Cannot return against a cancelled invoice", 409)
+    ensure_open(db, today())
     lines = {l.id: l for l in inv.lines}
     ret = SalesReturn(number=next_number(db, "sret", "SR", today()), invoice_id=iid, date=today(), user_id=user.id,
                       reason=body.reason, refund_method=body.refund_method, taxable=0, tax=0, total=0,

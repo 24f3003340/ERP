@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from ..core import ApiError, get_db, require
 from ..models import Account, AuditLog, DayClose, Expense, JournalEntry, JournalLine, Payment
-from ..schemas import DayCloseIn, ExpenseIn
-from ..services import audit, method_account, post_journal, today
+from ..schemas import DayCloseIn, ExpenseIn, ReopenIn
+from ..services import audit, ensure_open, method_account, post_journal, today
 
 router = APIRouter(prefix="/api", tags=["accounts"])
 
@@ -20,6 +20,7 @@ def add_expense(body: ExpenseIn, user=Depends(require("expenses.create")), db: S
     d = body.date or today()
     if d > today():
         raise ApiError("Expense date cannot be in the future")
+    ensure_open(db, d)
     e = Expense(date=d, category=body.category.strip(), amount=body.amount, method=body.method, note=body.note, user_id=user.id)
     db.add(e)
     db.flush()
@@ -95,6 +96,18 @@ def day_close(body: DayCloseIn, user=Depends(require("day.close")), db: Session 
     audit(db, user, "day.close", "day_close", None, body.reason, after={"date": d.isoformat(), "variance": var})
     db.commit()
     return {"expected_cash": expected, "counted_cash": body.counted_cash, "variance": var}
+
+
+@router.post("/day-close/reopen")
+def day_reopen(body: ReopenIn, user=Depends(require("day.reopen")), db: Session = Depends(get_db)):
+    dc = db.execute(select(DayClose).where(DayClose.date == body.date)).scalar_one_or_none()
+    if not dc:
+        raise ApiError("That day is not closed", 404)
+    audit(db, user, "day.reopen", "day_close", dc.id, body.reason,
+          before={"date": dc.date.isoformat(), "counted_cash": dc.counted_cash, "variance": dc.variance})
+    db.delete(dc)
+    db.commit()
+    return {"reopened": body.date.isoformat()}
 
 
 @router.get("/day-closes")

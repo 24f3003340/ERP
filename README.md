@@ -46,7 +46,7 @@ cd frontend && npm run dev                                    # UI :5173 (API ko
 cd backend && ../.venv/bin/python -m pytest -q                                  # SQLite
 ERP_DATABASE_URL=postgresql+psycopg2://erp:erp_pass@localhost:5432/erp_test ../.venv/bin/python -m pytest -q   # PostgreSQL
 ```
-17 tests: billing math (mixed GST), atomic stock, idempotent retry, permissions, credit limit, returns, cancel/reversal, purchases, day close, CSV import rollback, backup/restore, concurrent sale of last unit, ledger balance.
+25 tests: billing math (mixed GST), atomic stock, idempotent retry, permissions, credit limit, returns, cancel/reversal, purchases, day close, CSV import rollback, backup/restore, concurrent sale of last unit, ledger balance.
 
 ## Kya-kya hai (blueprint ke mutabiq)
 
@@ -63,18 +63,33 @@ ERP_DATABASE_URL=postgresql+psycopg2://erp:erp_pass@localhost:5432/erp_test ../.
 | Double-entry ledger, trial balance, P&L | ✅ |
 | Reports: sales, margin, stock valuation, receivables/payables, GST summary; CSV exports | ✅ |
 | Audit log (price override, cancel, reprint, adjustment, role change, backup, export, import) | ✅ |
-| Backup (auto daily + manual), verify, restore (SQLite), diagnostics & integrity checks | ✅ |
+| Backup (auto daily + manual, optional AES encryption), verify, restore (SQLite + PostgreSQL), diagnostics | ✅ |
 | CSV product import with preview, errors and all-or-nothing rollback | ✅ |
 | Hindi/English labels, INR formatting | ✅ (menu/dashboard; baaki screens English) |
 
-## Jo abhi nahi hai (honest list)
-- **Electron desktop shell / Windows installer** — abhi browser-based (localhost). Electron wrapper agla step hai.
-- Supplier (purchase) return aur purchase cancel; multi-branch, pharmacy batch/expiry, loyalty, e-commerce, AI — blueprint ke P2/later phases.
-- **E-invoice / IRN / GST return filing nahi hai.** GST summary sirf internal hai; CA se verify karwayein. Intra-state (CGST+SGST) maana gaya hai; inter-state IGST abhi nahi.
-- Day close sirf record + variance karta hai; closed din mein naye bills block nahi karta.
-- Backup encryption nahi; PostgreSQL ka restore admin `pg_restore` se karta hai (backup `pg_dump` se banta hai, UI se verify hota hai).
-- Schema migrations abhi `create_all` + version table; Alembic baad mein jodna hai.
-- Pilot (2–5 shops), CA/legal review aur printer testing real hardware par baaki hai.
+## Desktop app (Electron) aur Windows installer
+`desktop/` mein Electron shell hai: ye local server khud start karta hai, data `%APPDATA%\\Local ERP\\data` mein rakhta hai (install folder mein nahi, isliye upgrade/uninstall data nahi chhoone), aur hardened hai (contextIsolation, sandbox, CSP, navigation blocked).
+```bash
+cd desktop && npm install && npm start        # dev: repo ke .venv wale backend ke saath window kholta hai
+```
+Windows installer (`.exe`) Windows par banta hai: `scripts/build_windows.ps1` chalayein, ya GitHub → Actions → **Windows installer** → *Run workflow* (artifact download karein).
+
+## Backup encryption
+`ERP_BACKUP_PASSPHRASE="aapka-lamba-passphrase"` set karke app chalayein — har backup AES (Fernet, PBKDF2) se encrypt hota hai (`.enc`). Passphrase kho gaya to backup restore nahi hoga. Restore/verify ke time wahi passphrase set hona chahiye. Restore ab SQLite aur PostgreSQL (`pg_restore`) dono ke liye UI se hota hai; restore se pehle current data ka safety backup bante hai.
+
+## Migrations
+Schema ab Alembic se chalta hai (`backend/migrations/`). Purani install par app start hone par pending migration lagti hai, aur usse pehle automatic `pre-migration` backup banta hai.
+
+## Day close lock, IGST, purchase return
+- Din close hone ke baad us din naye bill / purchase / expense / payment / cancel / return block ho jaate hain (HTTP 423). Sirf owner reason ke saath "Reopen day" kar sakta hai (audit log mein).
+- Business aur customer/supplier ka 2-digit state code alag ho to invoice **IGST** hota hai, warna CGST+SGST. GST report mein dono alag dikhte hain.
+- Purchase cancel (stock/payable/payment reverse) aur supplier return (qty-limited, payable ghatata hai ya refund leta hai).
+
+## Jo abhi bhi nahi hai (honest list)
+- **E-invoice / IRN / GST return filing**: official GSTN/NIC portal ya GSP integration aur credentials chahiye; ye app generate nahi karta. GST summary sirf internal hai — CA se verify karwayein.
+- Windows installer is repo mein **build-ready** hai, par maine Linux par hi test kiya hai (Electron shell + packaged server chale); `.exe` Windows par ek baar build karke test karna baaki hai. Code signing nahi hai (SmartScreen warning aayegi).
+- Multi-branch, pharmacy batch/expiry, loyalty, e-commerce, AI — blueprint ke P2/later phases.
+- Pilot (2–5 shops), CA/legal review aur real printer testing — ye insaan/hardware ka kaam hai.
 
 ## Design notes
 - Paise (integer) mein paisa store hota hai; float nahi. Line-level tax/taxable invoice mein freeze hota hai.

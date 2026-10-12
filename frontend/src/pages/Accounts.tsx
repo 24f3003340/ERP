@@ -64,6 +64,7 @@ function Expenses({ canAdd }: { canAdd: boolean }) {
 
 function DayClose() {
   const toast = useToast();
+  const { can } = useSession();
   const { data, loading, reload } = useAsync(() => api("/day-close/preview"), []);
   const hist = useAsync(() => api("/day-closes"), []);
   const [counted, setCounted] = useState(""); const [reason, setReason] = useState(""); const [err, setErr] = useState("");
@@ -76,7 +77,8 @@ function DayClose() {
     <div>
       <div className="stats"><Stat label="Expected cash in drawer" value={inr(data.expected_cash)} tone="blue" />
         {Object.entries(data.by_method as Row).map(([m, v]: [string, any]) => <Stat key={m} label={`${m.toUpperCase()} today (in / out)`} value={`${inr(v.in)} / ${inr(v.out)}`} />)}</div>
-      {data.closed ? <div className="banner ok">Today is closed. Counted {inr(data.close.counted_cash)}, variance {inr(data.close.variance)} {data.close.reason && `(${data.close.reason})`}</div> : (
+      {data.closed ? <div className="banner ok">Today is closed — new bills, purchases, expenses and payments are blocked. Counted {inr(data.close.counted_cash)}, variance {inr(data.close.variance)} {data.close.reason && `(${data.close.reason})`}
+        {can("day.reopen") && <> <button className="btn sm" onClick={async () => { const r = prompt("Reason for reopening today (recorded in audit log):"); if (!r) return; try { await api("/day-close/reopen", { body: { date: data.date, reason: r } }); toast("Day reopened"); reload(); hist.reload(); } catch (e: any) { toast(e.message, "err"); } }}>Reopen day</button></>}</div> : (
         <div className="card"><h3>Close today</h3>
           <div className="grid3"><Field label="Counted cash ₹"><input type="number" min="0" step="0.01" value={counted} onChange={(e) => setCounted(e.target.value)} /></Field>
             <Field label={`Reason ${counted && variance !== 0 ? "(required — variance " + inr(variance) + ")" : ""}`}><input value={reason} onChange={(e) => setReason(e.target.value)} /></Field></div>

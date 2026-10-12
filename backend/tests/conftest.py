@@ -16,6 +16,8 @@ from app.models import Base  # noqa: E402
 @pytest.fixture(autouse=True)
 def fresh_db():
     Base.metadata.drop_all(engine)
+    with engine.begin() as c:
+        c.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
     init_db()
     yield
 

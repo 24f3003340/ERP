@@ -235,3 +235,139 @@ def test_concurrent_sales_of_last_unit(client, owner, shop):
     assert results.count(200) == 1, results
     assert client.get("/api/products", headers=owner, params={"q": "SOAP1"}).json()[0]["stock_qty"] == 0
     diag(client, owner)
+
+
+# ---------------- phase 2: purchase return/cancel, IGST, day lock, encryption, migrations ----------------
+def buy(client, h, shop, qty=50, cost=8000, inv="P-1", paid=0):
+    body = {"supplier_id": shop["sup"], "supplier_invoice_no": inv, "lines": [{"product_id": shop["rice"], "qty": qty, "unit_cost": cost}],
+            "payments": [{"method": "cash", "amount": paid}] if paid else []}
+    r = client.post("/api/purchases", headers=h, json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def stock(client, h, q="RICE1"):
+    return client.get("/api/products", headers=h, params={"q": q}).json()[0]["stock_qty"]
+
+
+def test_purchase_cancel_reverses_stock_and_payables(client, owner, shop):
+    p = buy(client, owner, shop, paid=100000)
+    assert stock(client, owner) == 150
+    assert client.post(f"/api/purchases/{p['id']}/cancel", headers=owner, json={"reason": "wrong supplier"}).status_code == 200
+    assert stock(client, owner) == 100
+    sup = [s for s in client.get("/api/suppliers", headers=owner).json() if s["id"] == shop["sup"]][0]
+    assert sup["balance"] == 0
+    assert client.get("/api/cashbook", headers=owner).json()["closing"] == 0
+    assert client.post(f"/api/purchases/{p['id']}/cancel", headers=owner, json={"reason": "again"}).status_code == 409
+    diag(client, owner)
+
+
+def test_purchase_cancel_blocked_when_goods_sold(client, owner, shop):
+    p = buy(client, owner, shop, qty=5)
+    sale(client, owner, [{"product_id": shop["rice"], "qty": 100}], [{"method": "cash", "amount": 1050000}])  # sells original stock
+    sale(client, owner, [{"product_id": shop["rice"], "qty": 5}], [{"method": "cash", "amount": 52500}])
+    r = client.post(f"/api/purchases/{p['id']}/cancel", headers=owner, json={"reason": "mistake"})
+    assert r.status_code == 409 and "Insufficient stock" in r.json()["detail"]
+    assert client.get(f"/api/purchases/{p['id']}", headers=owner).json()["status"] == "posted"
+    diag(client, owner)
+
+
+def test_supplier_return_limits_and_ledger(client, owner, shop):
+    p = buy(client, owner, shop, qty=10, cost=8000, paid=0)   # total 84000 payable
+    line = p["lines"][0]["id"]
+    assert client.post(f"/api/purchases/{p['id']}/returns", headers=owner, json={"lines": [{"purchase_line_id": line, "qty": 11}], "reason": "extra"}).status_code == 409
+    r = client.post(f"/api/purchases/{p['id']}/returns", headers=owner, json={"lines": [{"purchase_line_id": line, "qty": 4}], "reason": "damaged goods"})
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 33600 and r.json()["payable_reduction"] == 33600 and r.json()["refund_amount"] == 0
+    assert stock(client, owner) == 106
+    sup = [s for s in client.get("/api/suppliers", headers=owner).json() if s["id"] == shop["sup"]][0]
+    assert sup["balance"] == 84000 - 33600
+    # return the rest after paying in full -> cash refund from supplier
+    client.post(f"/api/suppliers/{shop['sup']}/payments", headers=owner, json={"amount": 50400, "method": "cash"})
+    r = client.post(f"/api/purchases/{p['id']}/returns", headers=owner, json={"lines": [{"purchase_line_id": line, "qty": 6}], "reason": "rest", "refund_method": "cash"})
+    assert r.json()["refund_amount"] == 50400 and r.json()["payable_reduction"] == 0
+    assert client.get(f"/api/suppliers/{shop['sup']}/statement", headers=owner).json()[-1]["balance"] == 0
+    assert client.post(f"/api/purchases/{p['id']}/cancel", headers=owner, json={"reason": "no way"}).status_code == 409
+    diag(client, owner)
+    g = client.get("/api/reports/gst", headers=owner).json()
+    assert g["input_tax"] == 0  # fully returned
+
+
+def test_igst_for_interstate_customer(client, owner, shop):
+    client.put("/api/business", headers=owner, json={"name": "Test Shop", "state_code": "08"})
+    other = client.post("/api/customers", headers=owner, json={"name": "Delhi Co", "state_code": "07"}).json()["id"]
+    same = client.post("/api/customers", headers=owner, json={"name": "Local", "state_code": "08"}).json()["id"]
+    a = sale(client, owner, [{"product_id": shop["soap"], "qty": 1}], [{"method": "upi", "amount": 11800}], customer_id=other).json()
+    b = sale(client, owner, [{"product_id": shop["soap"], "qty": 1}], [{"method": "upi", "amount": 11800}], customer_id=same).json()
+    assert a["is_igst"] is True and b["is_igst"] is False
+    g = client.get("/api/reports/gst", headers=owner).json()
+    ig = [r for r in g["output_by_rate"] if r["igst_supply"]][0]
+    st = [r for r in g["output_by_rate"] if not r["igst_supply"]][0]
+    assert ig["igst"] == 1800 and ig["cgst"] == 0 and st["cgst"] == 900 and st["sgst"] == 900 and st["igst"] == 0
+    assert g["output_tax_net"] == 3600
+    diag(client, owner)
+
+
+def test_day_close_locks_postings_and_owner_can_reopen(client, owner, cashier, shop):
+    assert client.post("/api/day-close", headers=owner, json={"counted_cash": 0}).status_code == 200
+    r = sale(client, owner, [{"product_id": shop["rice"], "qty": 1}], [{"method": "cash", "amount": 10500}])
+    assert r.status_code == 423 and "closed" in r.json()["detail"]
+    assert client.post("/api/expenses", headers=owner, json={"category": "Tea", "amount": 100}).status_code == 423
+    assert client.post("/api/purchases", headers=owner, json={"supplier_id": shop["sup"], "supplier_invoice_no": "Z", "lines": [{"product_id": shop["rice"], "qty": 1, "unit_cost": 1}]}).status_code == 423
+    # cashier cannot reopen; owner can, with a reason, and it is audited
+    from datetime import date
+    body = {"date": date.today().isoformat(), "reason": "late bill"}
+    assert client.post("/api/day-close/reopen", headers=cashier, json=body).status_code == 403
+    assert client.post("/api/day-close/reopen", headers=owner, json=body).status_code == 200
+    assert sale(client, owner, [{"product_id": shop["rice"], "qty": 1}], [{"method": "cash", "amount": 10500}]).status_code == 200
+    assert client.get("/api/audit", headers=owner, params={"action": "day.reopen"}).json()[0]["reason"] == "late bill"
+
+
+def test_encrypted_backup_roundtrip(client, owner, shop, monkeypatch):
+    from app.core import BACKUP_DIR, IS_SQLITE
+    monkeypatch.setenv("ERP_BACKUP_PASSPHRASE", "correct horse battery")
+    name = client.post("/api/backups", headers=owner).json()["name"]
+    assert name.endswith(".enc")
+    raw = (BACKUP_DIR / name).read_bytes()
+    assert raw.startswith(b"ERPENC1") and b"SQLite format" not in raw[:100] and b"PGDMP" not in raw[:100]
+    assert client.post(f"/api/backups/{name}/verify", headers=owner).json()["ok"]
+    monkeypatch.setenv("ERP_BACKUP_PASSPHRASE", "wrong")
+    assert client.post(f"/api/backups/{name}/verify", headers=owner).status_code == 400
+    monkeypatch.setenv("ERP_BACKUP_PASSPHRASE", "correct horse battery")
+    sale(client, owner, [{"product_id": shop["rice"], "qty": 1}], [{"method": "cash", "amount": 10500}])
+    assert client.post(f"/api/backups/{name}/restore", headers=owner).status_code == 200
+    assert client.get("/api/sales", headers=owner).json() == []
+    assert not list(BACKUP_DIR.glob("*.restore"))  # temp decrypted copy removed
+
+
+def test_restore_works_for_current_database(client, owner, shop):
+    """Plain backup -> change data -> restore (SQLite file swap or pg_restore)."""
+    name = client.post("/api/backups", headers=owner).json()["name"]
+    sale(client, owner, [{"product_id": shop["rice"], "qty": 2}], [{"method": "cash", "amount": 21000}])
+    r = client.post(f"/api/backups/{name}/restore", headers=owner)
+    assert r.status_code == 200, r.text
+    assert client.get("/api/sales", headers=owner).json() == []
+    assert stock(client, owner) == 100
+
+
+def test_migration_upgrades_old_schema(client, owner, shop):
+    """Simulate a v1.0 database (no IGST / purchase-return columns, no alembic table) and upgrade it in place."""
+    from sqlalchemy import inspect
+    from app.main import run_migrations
+    drops = [("customers", "state_code"), ("suppliers", "state_code"), ("sales_invoices", "is_igst"), ("purchase_invoices", "status"),
+             ("purchase_invoices", "credited"), ("purchase_invoices", "is_igst"), ("purchase_invoices", "cancel_reason"), ("purchase_lines", "returned_qty")]
+    with engine.begin() as c:
+        c.exec_driver_sql("DROP TABLE purchase_return_lines")
+        c.exec_driver_sql("DROP TABLE purchase_returns")
+        for t, col in drops:
+            c.exec_driver_sql(f"ALTER TABLE {t} DROP COLUMN {col}")
+        c.exec_driver_sql("DROP TABLE alembic_version")
+    run_migrations()
+    insp = inspect(engine)
+    for t, col in drops:
+        assert col in {c["name"] for c in insp.get_columns(t)}, (t, col)
+    assert "purchase_returns" in insp.get_table_names()
+    from app.core import BACKUP_DIR
+    assert list(BACKUP_DIR.glob("erp-pre-migration-*"))  # existing data was backed up first
+    # data survives and the app works on the upgraded schema
+    assert sale(client, owner, [{"product_id": shop["rice"], "qty": 1}], [{"method": "cash", "amount": 10500}]).status_code == 200

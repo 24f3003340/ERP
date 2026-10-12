@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..core import ApiError, get_db, require
 from ..models import (Customer, Payment, PaymentAllocation, PurchaseInvoice, SalesInvoice, Supplier)
 from ..schemas import PartyIn, SettleIn
-from ..services import audit, method_account, post_journal, today
+from ..services import audit, ensure_open, method_account, post_journal, today
 
 router = APIRouter(prefix="/api", tags=["parties"])
 
@@ -20,8 +20,8 @@ def customer_balance(db: Session, cid: int) -> int:
 
 
 def supplier_balance(db: Session, sid: int) -> int:
-    return int(db.execute(select(func.coalesce(func.sum(PurchaseInvoice.total - PurchaseInvoice.paid), 0))
-                          .where(PurchaseInvoice.supplier_id == sid)).scalar_one())
+    return int(db.execute(select(func.coalesce(func.sum(PurchaseInvoice.total - PurchaseInvoice.paid - PurchaseInvoice.credited), 0))
+                          .where(PurchaseInvoice.supplier_id == sid, PurchaseInvoice.status == "posted")).scalar_one())
 
 
 def _out(p, bal):
@@ -98,11 +98,16 @@ def _statement(db, party_type: str, pid: int):
             rows.append((i.created_at, f"Invoice {i.number}", i.total, 0))
         pays = db.execute(select(Payment).where(Payment.party_type == "customer", Payment.party_id == pid)).scalars()
     else:
-        for i in db.execute(select(PurchaseInvoice).where(PurchaseInvoice.supplier_id == pid)).scalars():
+        for i in db.execute(select(PurchaseInvoice).where(PurchaseInvoice.supplier_id == pid, PurchaseInvoice.status == "posted")).scalars():
             rows.append((i.created_at, f"Purchase {i.number} ({i.supplier_invoice_no})", i.total, 0))
         pays = db.execute(select(Payment).where(Payment.party_type == "supplier", Payment.party_id == pid)).scalars()
     for p in pays:
-        rows.append((p.created_at, f"{p.ref_type} {p.method.upper()}", 0, p.amount if p.direction == "in" or party_type == "supplier" else -p.amount))
+        rows.append((p.created_at, f"{p.ref_type} {p.method.upper()}", 0, p.amount if p.direction == ("in" if party_type == "customer" else "out") else -p.amount))
+    if party_type == "supplier":
+        from ..models import PurchaseReturn
+        for r in db.execute(select(PurchaseReturn).join(PurchaseInvoice, PurchaseInvoice.id == PurchaseReturn.invoice_id)
+                            .where(PurchaseInvoice.supplier_id == pid)).scalars():
+            rows.append((r.created_at, f"Return {r.number}", 0, r.total))
     if party_type == "customer":
         from ..models import SalesReturn
         for r in db.execute(select(SalesReturn).join(SalesInvoice, SalesInvoice.id == SalesReturn.invoice_id)
@@ -127,11 +132,14 @@ def supplier_statement(sid: int, user=Depends(require("parties.view")), db: Sess
 
 
 def _settle(db, user, kind: str, pid: int, body: SettleIn):
+    ensure_open(db, today())
     inv_model = SalesInvoice if kind == "customer" else PurchaseInvoice
     fk = inv_model.customer_id if kind == "customer" else inv_model.supplier_id
     st = select(inv_model).where(fk == pid).order_by(inv_model.created_at)
     if kind == "customer":
         st = st.where(SalesInvoice.status == "posted")
+    if kind == "supplier":
+        st = st.where(PurchaseInvoice.status == "posted")
     invs = [i for i in db.execute(st.with_for_update()).scalars()
             if (i.total - i.paid - (getattr(i, "credited", 0))) > 0]
     outstanding = sum(i.total - i.paid - getattr(i, "credited", 0) for i in invs)

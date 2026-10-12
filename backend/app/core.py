@@ -97,7 +97,7 @@ def make_token(user_id: int, role: str) -> str:
 ROLES = ["owner", "manager", "cashier", "stock", "accountant"]
 _ALL_BUT_ADMIN = {
     "products.view", "products.edit", "stock.adjust", "sales.create", "sales.view", "sales.cancel",
-    "sales.return", "price.override", "purchases.create", "purchases.view", "parties.view",
+    "sales.return", "price.override", "purchases.create", "purchases.view", "purchases.cancel", "purchases.return", "parties.view",
     "parties.edit", "payments.create", "expenses.create", "reports.view", "accounts.view",
     "day.close", "audit.view", "import.run", "export.run", "backup.create",
 }
@@ -105,7 +105,7 @@ PERMISSIONS: dict[str, set[str]] = {
     "owner": {"*"},
     "manager": _ALL_BUT_ADMIN,
     "cashier": {"products.view", "sales.create", "sales.view", "parties.view", "parties.edit", "payments.create"},
-    "stock": {"products.view", "products.edit", "stock.adjust", "purchases.create", "purchases.view",
+    "stock": {"products.view", "products.edit", "stock.adjust", "purchases.create", "purchases.view", "purchases.return",
               "parties.view", "parties.edit", "import.run", "export.run"},
     "accountant": {"products.view", "sales.view", "purchases.view", "parties.view", "payments.create",
                    "expenses.create", "reports.view", "accounts.view", "export.run", "day.close"},

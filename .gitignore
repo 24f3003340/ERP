@@ -7,3 +7,6 @@ frontend/dist/
 *.db
 *.db-wal
 *.db-shm
+build/
+desktop/release/
+*.spec

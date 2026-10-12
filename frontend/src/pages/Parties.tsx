@@ -14,7 +14,7 @@ export default function Parties({ kind }: { kind: "customer" | "supplier" }) {
   const label = kind === "customer" ? "Customer" : "Supplier";
   return (
     <div>
-      <div className="page-head"><h2>{label}s</h2>{can("parties.edit") && <button className="btn primary" onClick={() => setEdit({ name: "", phone: "", gstin: "", address: "", credit_limit: "0" })}>+ Add {label.toLowerCase()}</button>}</div>
+      <div className="page-head"><h2>{label}s</h2>{can("parties.edit") && <button className="btn primary" onClick={() => setEdit({ name: "", phone: "", gstin: "", address: "", state_code: "", credit_limit: "0" })}>+ Add {label.toLowerCase()}</button>}</div>
       <div className="filters"><input placeholder="Search name / phone" value={q} onChange={(e) => setQ(e.target.value)} /></div>
       {loading ? <Loading /> : error ? <Empty>{error}</Empty> : !data?.length ? <Empty>No {kind}s yet.</Empty> : (
         <Table head={["Name", "Phone", "GSTIN", kind === "customer" ? "Credit limit" : "", kind === "customer" ? "Receivable" : "Payable", ""]}>
@@ -41,13 +41,14 @@ function PartyForm({ kind, p, onClose }: { kind: string; p: Row; onClose: (chang
   const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.value });
   async function save() {
     const base = kind === "customer" ? "/customers" : "/suppliers";
-    try { await api(p.id ? `${base}/${p.id}` : base, { method: p.id ? "PUT" : "POST", body: { name: f.name, phone: f.phone, gstin: f.gstin, address: f.address, credit_limit: toPaise(f.credit_limit) } }); onClose(true); } catch (e: any) { setErr(e.message); }
+    try { await api(p.id ? `${base}/${p.id}` : base, { method: p.id ? "PUT" : "POST", body: { name: f.name, phone: f.phone, gstin: f.gstin, state_code: f.state_code || "", address: f.address, credit_limit: toPaise(f.credit_limit) } }); onClose(true); } catch (e: any) { setErr(e.message); }
   }
   return (
     <Modal title={p.id ? "Edit" : "Add"} onClose={() => onClose()}>
       <Field label="Name *"><input autoFocus value={f.name} onChange={set("name")} /></Field>
       <div className="grid2"><Field label="Phone"><input value={f.phone} onChange={set("phone")} /></Field><Field label="GSTIN"><input value={f.gstin} onChange={set("gstin")} /></Field></div>
       <Field label="Address"><input value={f.address} onChange={set("address")} /></Field>
+      <Field label="State code (2 digits, e.g. 08 = Rajasthan)" hint="If different from your business state, bills use IGST"><input maxLength={2} value={f.state_code || ""} onChange={set("state_code")} /></Field>
       {kind === "customer" && <Field label="Credit limit ₹ (0 = no limit)"><input type="number" min="0" step="0.01" value={f.credit_limit} onChange={set("credit_limit")} /></Field>}
       {err && <div className="error">{err}</div>}
       <div className="actions end"><button className="btn" onClick={() => onClose()}>Cancel</button><button className="btn primary" disabled={!f.name.trim()} onClick={save}>Save</button></div>

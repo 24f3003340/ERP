@@ -14,19 +14,12 @@ export default function Purchases() {
         <Table head={["No.", "Supplier inv.", "Date", "Supplier", "Total", "Paid", "Due"]}>
           {data.map((p: Row) => (
             <tr key={p.id}><td><button className="link" onClick={() => api("/purchases/" + p.id).then(setView)}>{p.number}</button></td><td>{p.supplier_invoice_no}</td><td>{fdate(p.date)}</td><td>{p.supplier}</td>
-              <td className="r">{inr(p.total)}</td><td className="r">{inr(p.paid)}</td><td className="r">{p.due > 0 ? <Badge tone="warn">{inr(p.due)}</Badge> : "—"}</td></tr>
+              <td className="r">{inr(p.total)}</td><td className="r">{inr(p.paid)}</td><td className="r">{p.status === "cancelled" ? <Badge tone="err">Cancelled</Badge> : p.due > 0 ? <Badge tone="warn">{inr(p.due)}</Badge> : "—"}</td></tr>
           ))}
         </Table>
       )}
       {open && <PurchaseForm onClose={(ch) => { setOpen(false); ch && reload(); }} />}
-      {view && (
-        <Modal title={`Purchase ${view.number}`} onClose={() => setView(null)} wide>
-          <Table head={["Item", "Qty", "Cost", "GST%", "Taxable", "Tax", "Total"]}>
-            {view.lines.map((l: Row, i: number) => (<tr key={i}><td>{l.name}</td><td>{l.qty}</td><td className="r">{inr(l.unit_cost)}</td><td>{l.gst_rate}</td><td className="r">{inr(l.taxable)}</td><td className="r">{inr(l.tax)}</td><td className="r">{inr(l.line_total)}</td></tr>))}
-          </Table>
-          <div className="row-between grand"><span>Total</span><span>{inr(view.total)}</span></div>
-        </Modal>
-      )}
+      {view && <PurchaseView p={view} can={can} onClose={(ch) => { setView(null); ch && reload(); }} />}
     </div>
   );
 }
@@ -86,6 +79,53 @@ function PurchaseForm({ onClose }: { onClose: (changed?: boolean) => void }) {
       </div>
       {err && <div className="error">{err}</div>}
       <div className="actions end"><button className="btn" onClick={() => onClose()}>Cancel</button><button className="btn primary" disabled={busy || !supplier || !invNo || !lines.length} onClick={save}>Save purchase</button></div>
+    </Modal>
+  );
+}
+
+function PurchaseView({ p, can, onClose }: { p: Row; can: (x: string) => boolean; onClose: (changed?: boolean) => void }) {
+  const toast = useToast();
+  const [mode, setMode] = useState<"" | "return" | "cancel">("");
+  const [qty, setQty] = useState<Record<number, string>>({});
+  const [method, setMethod] = useState("cash");
+  const [reason, setReason] = useState("");
+  const [err, setErr] = useState("");
+  async function go() {
+    try {
+      if (mode === "cancel") {
+        await api(`/purchases/${p.id}/cancel`, { body: { reason } });
+        toast("Purchase cancelled; stock and supplier balance reversed");
+      } else {
+        const lines = p.lines.filter((l: Row) => parseFloat(qty[l.id] || "0") > 0).map((l: Row) => ({ purchase_line_id: l.id, qty: parseFloat(qty[l.id]) }));
+        if (!lines.length) return setErr("Enter a quantity to return");
+        const r = await api(`/purchases/${p.id}/returns`, { body: { lines, refund_method: method, reason } });
+        toast(`Return ${r.number}: payable reduced ${inr(r.payable_reduction)}, refund received ${inr(r.refund_amount)}`);
+      }
+      onClose(true);
+    } catch (e: any) { setErr(e.message); }
+  }
+  return (
+    <Modal title={`Purchase ${p.number}${p.status === "cancelled" ? " — CANCELLED" : ""}`} onClose={() => onClose()} wide>
+      <Table head={mode === "return" ? ["Item", "Bought", "Returned", "Return qty"] : ["Item", "Qty", "Cost", "GST%", "Taxable", "Tax", "Total"]}>
+        {p.lines.map((l: Row, i: number) => mode === "return" ? (
+          <tr key={i}><td>{l.name}</td><td>{l.qty}</td><td>{l.returned_qty}</td>
+            <td><input className="num" type="number" min="0" max={l.qty - l.returned_qty} step="any" value={qty[l.id] || ""} disabled={l.qty - l.returned_qty <= 0} onChange={(e) => setQty({ ...qty, [l.id]: e.target.value })} /></td></tr>
+        ) : (
+          <tr key={i}><td>{l.name}</td><td>{l.qty}{l.returned_qty ? <small className="muted"> ({l.returned_qty} returned)</small> : null}</td><td className="r">{inr(l.unit_cost)}</td><td>{l.gst_rate}</td><td className="r">{inr(l.taxable)}</td><td className="r">{inr(l.tax)}</td><td className="r">{inr(l.line_total)}</td></tr>
+        ))}
+      </Table>
+      <div className="row-between grand"><span>Total {p.is_igst ? "(IGST)" : ""}</span><span>{inr(p.total)}</span></div>
+      {p.status === "cancelled" && <div className="banner warn">Cancelled: {p.cancel_reason}</div>}
+      {mode && (<div className="card">
+        <h3>{mode === "cancel" ? "Cancel this purchase" : "Return goods to supplier"}</h3>
+        {mode === "return" && <Field label="If nothing is payable, supplier refunds via"><select value={method} onChange={(e) => setMethod(e.target.value)}><option value="cash">Cash</option><option value="upi">UPI</option><option value="bank">Bank</option></select></Field>}
+        <Field label="Reason (required)"><input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+        {err && <div className="error">{err}</div>}
+        <div className="actions end"><button className="btn" onClick={() => { setMode(""); setErr(""); }}>Back</button>
+          <button className={"btn " + (mode === "cancel" ? "danger" : "primary")} disabled={reason.trim().length < 3} onClick={go}>{mode === "cancel" ? "Cancel purchase" : "Process return"}</button></div></div>)}
+      {!mode && p.status === "posted" && <div className="actions end">
+        {can("purchases.return") && <button className="btn" onClick={() => setMode("return")}>Return to supplier</button>}
+        {can("purchases.cancel") && <button className="btn danger" onClick={() => setMode("cancel")}>Cancel purchase</button>}</div>}
     </Modal>
   );
 }

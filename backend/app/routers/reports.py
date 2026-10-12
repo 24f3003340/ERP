@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..core import get_db, require
-from ..models import (Customer, Payment, Product, PurchaseInvoice, SalesInvoice, SalesLine, SalesReturn, SalesReturnLine, Supplier)
+from ..models import (Customer, Payment, Product, PurchaseInvoice, PurchaseReturn, SalesInvoice, SalesLine, SalesReturn, SalesReturnLine, Supplier)
 from ..services import audit, today
 from .parties import customer_balance, supplier_balance
 
@@ -27,7 +27,7 @@ def dashboard(user=Depends(require("sales.view")), db: Session = Depends(get_db)
     cash = db.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.date == t, Payment.method == "cash", Payment.direction == "in"))
     digital = db.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(Payment.date == t, Payment.method != "cash", Payment.direction == "in"))
     recv = db.scalar(select(func.coalesce(func.sum(SalesInvoice.total - SalesInvoice.paid - SalesInvoice.credited), 0)).where(posted))
-    pay = db.scalar(select(func.coalesce(func.sum(PurchaseInvoice.total - PurchaseInvoice.paid), 0)))
+    pay = db.scalar(select(func.coalesce(func.sum(PurchaseInvoice.total - PurchaseInvoice.paid - PurchaseInvoice.credited), 0)).where(PurchaseInvoice.status == "posted"))
     low = db.execute(select(Product).where(Product.active.is_(True), Product.stock_qty <= Product.reorder_level, Product.reorder_level > 0).order_by(Product.stock_qty).limit(8)).scalars()
     trend = []
     for k in range(6, -1, -1):
@@ -90,18 +90,21 @@ def dues_report(user=Depends(require("reports.view")), db: Session = Depends(get
 @router.get("/reports/gst")
 def gst_report(date_from: date_t | None = None, date_to: date_t | None = None, user=Depends(require("reports.view")), db: Session = Depends(get_db)):
     d1, d2 = _range(date_from, date_to)
-    out = db.execute(select(SalesLine.gst_rate, func.sum(SalesLine.taxable), func.sum(SalesLine.tax))
+    out = db.execute(select(SalesLine.gst_rate, SalesInvoice.is_igst, func.sum(SalesLine.taxable), func.sum(SalesLine.tax))
                      .join(SalesInvoice, SalesInvoice.id == SalesLine.invoice_id)
                      .where(SalesInvoice.date >= d1, SalesInvoice.date <= d2, SalesInvoice.status == "posted")
-                     .group_by(SalesLine.gst_rate).order_by(SalesLine.gst_rate)).all()
+                     .group_by(SalesLine.gst_rate, SalesInvoice.is_igst).order_by(SalesLine.gst_rate)).all()
     rets = db.execute(select(func.coalesce(func.sum(SalesReturn.taxable), 0), func.coalesce(func.sum(SalesReturn.tax), 0))
                       .where(SalesReturn.date >= d1, SalesReturn.date <= d2)).one()
+    prets = db.execute(select(func.coalesce(func.sum(PurchaseReturn.taxable), 0), func.coalesce(func.sum(PurchaseReturn.tax), 0))
+                       .where(PurchaseReturn.date >= d1, PurchaseReturn.date <= d2)).one()
     inn = db.execute(select(func.coalesce(func.sum(PurchaseInvoice.taxable), 0), func.coalesce(func.sum(PurchaseInvoice.tax_total), 0))
-                     .where(PurchaseInvoice.date >= d1, PurchaseInvoice.date <= d2)).one()
-    rows = [{"rate": float(r), "taxable": t, "tax": x, "cgst": x // 2, "sgst": x - x // 2} for r, t, x in out]
+                     .where(PurchaseInvoice.date >= d1, PurchaseInvoice.date <= d2, PurchaseInvoice.status == "posted")).one()
+    rows = [{"rate": float(r), "igst_supply": bool(ig), "taxable": t, "tax": x, "cgst": 0 if ig else x // 2,
+             "sgst": 0 if ig else x - x // 2, "igst": x if ig else 0} for r, ig, t, x in out]
     out_tax = sum(r["tax"] for r in rows) - rets[1]
     return {"from": d1.isoformat(), "to": d2.isoformat(), "output_by_rate": rows, "sales_return_taxable": rets[0], "sales_return_tax": rets[1],
-            "output_tax_net": out_tax, "input_taxable": inn[0], "input_tax": inn[1], "net_payable": out_tax - inn[1],
+            "output_tax_net": out_tax, "input_taxable": inn[0] - prets[0], "input_tax": inn[1] - prets[1], "net_payable": out_tax - (inn[1] - prets[1]),
             "note": "Internal summary only. Verify with your CA before filing returns; this app does not generate e-invoice/IRN."}
 
 
@@ -117,9 +120,9 @@ def export_csv(kind: str, date_from: date_t | None = None, date_to: date_t | Non
             w.writerow([i.number, i.date, i.customer.name if i.customer else "Walk-in", i.status, i.taxable / 100, i.tax_total / 100,
                         i.round_off / 100, i.total / 100, i.paid / 100, (i.total - i.paid - i.credited) / 100 if i.status == "posted" else 0])
     elif kind == "purchases":
-        w.writerow(["number", "date", "supplier", "supplier_invoice", "taxable", "tax", "total", "paid"])
+        w.writerow(["number", "date", "supplier", "supplier_invoice", "status", "taxable", "tax", "total", "paid"])
         for i in db.execute(select(PurchaseInvoice).where(PurchaseInvoice.date >= d1, PurchaseInvoice.date <= d2).order_by(PurchaseInvoice.id)).scalars():
-            w.writerow([i.number, i.date, i.supplier.name, i.supplier_invoice_no, i.taxable / 100, i.tax_total / 100, i.total / 100, i.paid / 100])
+            w.writerow([i.number, i.date, i.supplier.name, i.supplier_invoice_no, i.status, i.taxable / 100, i.tax_total / 100, i.total / 100, i.paid / 100])
     else:
         from ..core import ApiError
         raise ApiError("Unknown export", 404)

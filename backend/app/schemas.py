@@ -64,6 +64,7 @@ class ProductIn(BaseModel):
 
 class PartyIn(BaseModel):
     name: str = Field(min_length=1)
+    state_code: str = Field("", max_length=4)
     phone: str = ""
     gstin: str = ""
     address: str = ""
@@ -156,3 +157,19 @@ class DayCloseIn(BaseModel):
     date: dt.date | None = None
     counted_cash: int = Field(ge=0)
     reason: str = ""
+
+
+class PurchaseReturnLineIn(BaseModel):
+    purchase_line_id: int
+    qty: Decimal = Field(gt=0)
+
+
+class PurchaseReturnIn(BaseModel):
+    lines: list[PurchaseReturnLineIn] = Field(min_length=1)
+    refund_method: Method = "cash"
+    reason: str = Field(min_length=3)
+
+
+class ReopenIn(BaseModel):
+    date: dt.date
+    reason: str = Field(min_length=3)

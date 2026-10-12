@@ -27,7 +27,8 @@ function Biz() {
     <div className="card narrow">
       <Field label="Business name"><input value={f.name} onChange={set("name")} /></Field>
       <div className="grid2"><Field label="GSTIN"><input value={f.gstin} onChange={set("gstin")} /></Field><Field label="Phone"><input value={f.phone} onChange={set("phone")} /></Field></div>
-      <Field label="Address"><input value={f.address} onChange={set("address")} /></Field>
+      <div className="grid2"><Field label="Address"><input value={f.address} onChange={set("address")} /></Field>
+        <Field label="State code (2 digits)" hint="Needed to choose CGST+SGST vs IGST"><input maxLength={2} value={f.state_code} onChange={set("state_code")} /></Field></div>
       <div className="grid2"><Field label="Invoice prefix"><input value={f.invoice_prefix} onChange={set("invoice_prefix")} maxLength={10} /></Field>
         <Field label="Cashier max discount %" hint="Above this a manager must bill"><input type="number" min="0" max="100" value={f.max_cashier_discount_pct} onChange={set("max_cashier_discount_pct")} /></Field></div>
       <Field label="Invoice footer"><input value={f.footer} onChange={set("footer")} /></Field>
@@ -75,14 +76,14 @@ function Backup() {
   }
   return (
     <div>
-      <div className="banner">Automatic backup runs daily (last 14 kept). Also copy backups to a pen drive regularly — a backup on the same disk does not protect against disk failure. Try restoring on a test copy before you need it.</div>
+      <div className={"banner" + (data && !data.encrypted ? "" : " ok")}>{data?.encrypted ? "🔒 Backups are encrypted (AES). Keep the passphrase safe — without it they cannot be restored. " : "Backups are NOT encrypted — set ERP_BACKUP_PASSPHRASE to enable encryption. "}Automatic backup runs daily (last 14 kept). Also copy backups to a pen drive regularly — a backup on the same disk does not protect against disk failure. Try restoring on a test copy before you need it.</div>
       <div className="actions" style={{ margin: "8px 0" }}><button className="btn primary" disabled={busy} onClick={create}>{busy ? "Creating…" : "Create backup now"}</button></div>
       {loading ? <Loading /> : !data?.backups.length ? <Empty>No backups yet.</Empty> : (
         <Table head={["File", "Created", "Size", ""]}>{data.backups.map((b: Row) => (
           <tr key={b.name}><td>{b.name}</td><td>{fdt(b.at)}</td><td>{(b.size / 1024).toFixed(0)} KB</td>
             <td className="actions"><button className="btn sm" onClick={() => verify(b.name)}>Verify</button>
               {can("backup.restore") && <><button className="btn sm" onClick={() => download(`/backups/${b.name}/download`, b.name).catch((e) => toast(e.message, "err"))}>Download</button>
-                {data.mode === "sqlite" && <button className="btn sm danger" onClick={() => restore(b.name)}>Restore</button>}</>}</td></tr>))}</Table>)}
+                <button className="btn sm danger" onClick={() => restore(b.name)}>Restore</button></>}</td></tr>))}</Table>)}
     </div>
   );
 }

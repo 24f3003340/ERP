@@ -41,5 +41,5 @@ function Body({ tab, d }: { tab: string; d: Row }) {
   return (<>
     <div className="banner warn">{d.note}</div>
     <div className="stats"><Stat label="Output GST (net of returns)" value={inr(d.output_tax_net)} /><Stat label="Input GST (purchases)" value={inr(d.input_tax)} /><Stat label="Net payable (indicative)" value={inr(d.net_payable)} tone="blue" /></div>
-    <Table head={["GST rate", "Taxable value", "CGST", "SGST", "Total tax"]}>{d.output_by_rate.map((r: Row) => <tr key={r.rate}><td>{r.rate}%</td><td className="r">{inr(r.taxable)}</td><td className="r">{inr(r.cgst)}</td><td className="r">{inr(r.sgst)}</td><td className="r">{inr(r.tax)}</td></tr>)}</Table></>);
+    <Table head={["GST rate", "Supply", "Taxable value", "CGST", "SGST", "IGST", "Total tax"]}>{d.output_by_rate.map((r: Row) => <tr key={r.rate + String(r.igst_supply)}><td>{r.rate}%</td><td>{r.igst_supply ? "Inter-state" : "Intra-state"}</td><td className="r">{inr(r.taxable)}</td><td className="r">{inr(r.cgst)}</td><td className="r">{inr(r.sgst)}</td><td className="r">{inr(r.igst)}</td><td className="r">{inr(r.tax)}</td></tr>)}</Table></>);
 }

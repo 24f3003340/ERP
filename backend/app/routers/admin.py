@@ -1,10 +1,16 @@
+import base64
+import os
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select, text
@@ -15,6 +21,53 @@ from ..models import (JournalEntry, JournalLine, Product, PurchaseInvoice, Sales
 from ..services import audit
 
 router = APIRouter(prefix="/api", tags=["admin"])
+
+
+MAGIC = b"ERPENC1"
+
+
+def _passphrase() -> str | None:
+    return os.environ.get("ERP_BACKUP_PASSPHRASE") or None
+
+
+def _fernet(salt: bytes, passphrase: str) -> Fernet:
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=390_000)
+    return Fernet(base64.urlsafe_b64encode(kdf.derive(passphrase.encode())))
+
+
+def encrypt_in_place(path: Path, passphrase: str) -> Path:
+    """Replace backup file with an AES-encrypted copy (name + .enc). Format: MAGIC | salt | Fernet token."""
+    salt = os.urandom(16)
+    out = path.with_name(path.name + ".enc")
+    out.write_bytes(MAGIC + salt + _fernet(salt, passphrase).encrypt(path.read_bytes()))
+    path.unlink()
+    return out
+
+
+def plain_copy(path: Path) -> tuple[Path, bool]:
+    """Return a readable copy of a backup (decrypting if needed). Caller deletes it when the 2nd value is True."""
+    if path.suffix != ".enc":
+        return path, False
+    pw = _passphrase()
+    if not pw:
+        raise ApiError("This backup is encrypted. Set ERP_BACKUP_PASSPHRASE to the passphrase used when it was created.", 400)
+    raw = path.read_bytes()
+    if not raw.startswith(MAGIC):
+        raise ApiError("Not a valid encrypted backup", 400)
+    try:
+        data = _fernet(raw[len(MAGIC):len(MAGIC) + 16], pw).decrypt(raw[len(MAGIC) + 16:])
+    except InvalidToken:
+        raise ApiError("Wrong passphrase or corrupted backup", 400)
+    fd, tmp = tempfile.mkstemp(suffix=".restore", dir=BACKUP_DIR)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return Path(tmp), True
+
+
+def _pg_args():
+    u = urlparse(DATABASE_URL.replace("+psycopg2", ""))
+    env = {"PGPASSWORD": u.password or "", "PATH": "/usr/bin:/usr/local/bin:/bin:/usr/lib/postgresql/16/bin"}
+    return ["-h", u.hostname or "localhost", "-p", str(u.port or 5432), "-U", u.username or ""], u.path.lstrip("/"), env
 
 
 def sqlite_path() -> Path:
@@ -33,13 +86,13 @@ def make_backup(kind: str = "manual") -> Path:
         dst.close()
     else:
         dest = BACKUP_DIR / f"erp-{kind}-{stamp}.dump"
-        u = urlparse(DATABASE_URL.replace("+psycopg2", ""))
-        env = {"PGPASSWORD": u.password or "", "PATH": "/usr/bin:/usr/local/bin:/bin"}
-        r = subprocess.run(["pg_dump", "-Fc", "-h", u.hostname or "localhost", "-p", str(u.port or 5432), "-U", u.username or "",
-                            "-f", str(dest), u.path.lstrip("/")], env=env, capture_output=True, text=True)
+        args, dbname, env = _pg_args()
+        r = subprocess.run(["pg_dump", "-Fc", *args, "-f", str(dest), dbname], env=env, capture_output=True, text=True)
         if r.returncode:
             dest.unlink(missing_ok=True)
             raise ApiError("pg_dump failed: " + r.stderr[:300], 500)
+    if _passphrase():
+        dest = encrypt_in_place(dest, _passphrase())  # type: ignore[arg-type]
     prune()
     return dest
 
@@ -72,7 +125,7 @@ def verify_sqlite_backup(path: Path) -> dict:
 
 @router.get("/backups")
 def backups(user=Depends(require("backup.create"))):
-    return {"backups": list_backups(), "mode": "sqlite" if IS_SQLITE else "postgresql"}
+    return {"backups": list_backups(), "mode": "sqlite" if IS_SQLITE else "postgresql", "encrypted": bool(_passphrase())}
 
 
 @router.post("/backups")
@@ -88,7 +141,7 @@ def download(name: str, user=Depends(require("backup.restore"))):
     f = BACKUP_DIR / Path(name).name
     if not f.exists():
         raise ApiError("Backup not found", 404)
-    return FileResponse(f, filename=f.name)
+    return FileResponse(f, filename=f.name)  # stays encrypted if encryption is enabled
 
 
 @router.post("/backups/{name}/verify")
@@ -96,10 +149,15 @@ def verify(name: str, user=Depends(require("backup.create"))):
     f = BACKUP_DIR / Path(name).name
     if not f.exists():
         raise ApiError("Backup not found", 404)
-    if not IS_SQLITE:
-        r = subprocess.run(["pg_restore", "-l", str(f)], capture_output=True, text=True)
-        return {"ok": r.returncode == 0, "integrity": "pg_restore listing ok" if r.returncode == 0 else r.stderr[:200]}
-    return verify_sqlite_backup(f)
+    src, tmp = plain_copy(f)
+    try:
+        if not IS_SQLITE:
+            r = subprocess.run(["pg_restore", "-l", str(src)], capture_output=True, text=True)
+            return {"ok": r.returncode == 0, "integrity": "pg_restore listing ok" if r.returncode == 0 else r.stderr[:200]}
+        return verify_sqlite_backup(src)
+    finally:
+        if tmp:
+            src.unlink(missing_ok=True)
 
 
 @router.post("/backups/{name}/restore")
@@ -107,21 +165,37 @@ def restore(name: str, user=Depends(require("backup.restore")), db: Session = De
     f = BACKUP_DIR / Path(name).name
     if not f.exists():
         raise ApiError("Backup not found", 404)
-    if not IS_SQLITE:
-        raise ApiError("PostgreSQL restore must be run by an administrator: pg_restore --clean --if-exists -d <db> <file> (see README)", 400)
-    v = verify_sqlite_backup(f)
-    if not v["ok"]:
-        raise ApiError("Backup failed verification; restore refused", 409)
-    audit(db, user, "backup.restore", "backup", None, f.name)
-    db.commit()
-    db.close()
-    pre = make_backup("pre-restore")
-    engine.dispose()
-    target = sqlite_path()
-    for ext in ("-wal", "-shm"):
-        Path(str(target) + ext).unlink(missing_ok=True)
-    shutil.copyfile(f, target)
-    return {"restored": f.name, "pre_restore_backup": pre.name, "verify": v}
+    src, tmp = plain_copy(f)
+    try:
+        if IS_SQLITE:
+            v = verify_sqlite_backup(src)
+            if not v["ok"]:
+                raise ApiError("Backup failed verification; restore refused", 409)
+        else:
+            args, dbname, env = _pg_args()
+            chk = subprocess.run(["pg_restore", "-l", str(src)], capture_output=True, text=True)
+            if chk.returncode:
+                raise ApiError("Backup failed verification; restore refused", 409)
+            v = {"ok": True, "integrity": "pg_restore listing ok"}
+        audit(db, user, "backup.restore", "backup", None, f.name)
+        db.commit()
+        db.close()
+        pre = make_backup("pre-restore")  # safety copy of current data first
+        engine.dispose()
+        if IS_SQLITE:
+            target = sqlite_path()
+            for ext in ("-wal", "-shm"):
+                Path(str(target) + ext).unlink(missing_ok=True)
+            shutil.copyfile(src, target)
+        else:
+            r = subprocess.run(["pg_restore", "--clean", "--if-exists", "--no-owner", *args, "-d", dbname, str(src)],
+                               env=env, capture_output=True, text=True)
+            if r.returncode and "error" in r.stderr.lower():
+                raise ApiError(f"pg_restore failed (safety copy {pre.name} kept): " + r.stderr[:300], 500)
+        return {"restored": f.name, "pre_restore_backup": pre.name, "verify": v}
+    finally:
+        if tmp:
+            src.unlink(missing_ok=True)
 
 
 @router.get("/diagnostics")
@@ -147,4 +221,4 @@ def diagnostics(user=Depends(require("backup.create")), db: Session = Depends(ge
     checks.append({"name": "No negative stock", "ok": neg == 0, "detail": f"{neg} products"})
     return {"version": APP_VERSION, "database": "SQLite" if IS_SQLITE else "PostgreSQL", "db_url": DATABASE_URL.split("@")[-1] if not IS_SQLITE else str(sqlite_path()),
             "disk_free_mb": free // 1_000_000, "low_disk": free < 500_000_000,
-            "last_backup": bks[0] if bks else None, "backup_count": len(bks), "checks": checks, "healthy": all(c["ok"] for c in checks)}
+            "last_backup": bks[0] if bks else None, "backup_encryption": bool(_passphrase()), "backup_count": len(bks), "checks": checks, "healthy": all(c["ok"] for c in checks)}

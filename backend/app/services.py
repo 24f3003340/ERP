@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .core import ApiError
-from .models import (Account, AuditLog, Business, Counter, JournalEntry, JournalLine, Product, StockMovement)
+from .models import (Account, AuditLog, Business, Counter, DayClose, JournalEntry, JournalLine, Product, StockMovement)
 
 D = Decimal
 
@@ -147,3 +147,13 @@ def unwrap_integrity(e: IntegrityError) -> ApiError:
     if "unique" in msg or "duplicate" in msg:
         return ApiError("Duplicate value: a record with the same unique field already exists", 409)
     return ApiError("Database constraint failed: " + str(e.orig).split("\n")[0], 409)
+
+
+def ensure_open(db: Session, d: date) -> None:
+    """Money-affecting postings are refused on a closed business day (owner can reopen with a reason)."""
+    if db.execute(select(DayClose.id).where(DayClose.date == d)).first():
+        raise ApiError(f"{d.isoformat()} is already closed. Ask the owner to reopen the day (Accounts → Day close).", 423)
+
+
+def is_interstate(biz_state: str, party_state: str) -> bool:
+    return bool(biz_state and party_state and biz_state.strip() != party_state.strip())

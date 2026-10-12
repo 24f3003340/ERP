@@ -46,8 +46,9 @@ export function InvoiceView({ inv, onClose }: { inv: Row; onClose: () => void })
         </table>
         <div className="inv-totals">
           <div className="row-between"><span>Taxable value</span><span>{inr(inv.taxable)}</span></div>
-          <div className="row-between"><span>CGST</span><span>{inr(cgstsgst(inv.tax_total)[0])}</span></div>
-          <div className="row-between"><span>SGST</span><span>{inr(cgstsgst(inv.tax_total)[1])}</span></div>
+          {inv.is_igst ? <div className="row-between"><span>IGST</span><span>{inr(inv.tax_total)}</span></div> : <>
+            <div className="row-between"><span>CGST</span><span>{inr(cgstsgst(inv.tax_total)[0])}</span></div>
+            <div className="row-between"><span>SGST</span><span>{inr(cgstsgst(inv.tax_total)[1])}</span></div></>}
           {inv.round_off !== 0 && <div className="row-between"><span>Round off</span><span>{inr(inv.round_off)}</span></div>}
           <div className="row-between grand"><span>Total</span><span>{inr(inv.total)}</span></div>
           <div className="row-between"><span>Paid</span><span>{inr(inv.paid)}</span></div>
