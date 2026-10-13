@@ -77,12 +77,28 @@ def _auto_backup_loop() -> None:
         time.sleep(3600)
 
 
+def _maybe_seed_demo() -> None:
+    """Hosted preview only: ERP_DEMO_SEED=1 + ERP_DEMO_PASSWORD loads dummy data once, if the database is empty."""
+    pw = os.environ.get("ERP_DEMO_PASSWORD")
+    if os.environ.get("ERP_DEMO_SEED") != "1" or not pw:
+        return
+    from fastapi.testclient import TestClient
+    from .demo import seed
+    from .models import User
+    with SessionLocal() as db:
+        if db.execute(select(User.id).limit(1)).first():
+            return
+    seed(TestClient(app, base_url="http://localhost"), pw)
+    log.warning("demo data loaded")
+
+
 app = FastAPI(title="Local ERP", version=APP_VERSION)
 
 
 @app.on_event("startup")
 def _startup():
     init_db()
+    _maybe_seed_demo()
     threading.Thread(target=_auto_backup_loop, daemon=True).start()
 
 

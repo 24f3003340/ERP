@@ -20,6 +20,10 @@ BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = os.environ.get("ERP_DATABASE_URL", f"sqlite:///{(DATA_DIR / 'erp.db').as_posix()}")
+# hosting providers hand out postgres:// or postgresql:// URLs; use the psycopg2 driver explicitly
+for _p in ("postgres://", "postgresql://"):
+    if DATABASE_URL.startswith(_p):
+        DATABASE_URL = "postgresql+psycopg2://" + DATABASE_URL[len(_p):]
 IS_SQLITE = DATABASE_URL.startswith("sqlite")
 APP_VERSION = "1.0.0"
 
